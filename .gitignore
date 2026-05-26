@@ -1,0 +1,21 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Environment / secrets
+.env
+*.env
+token_vault.json
+secrets/
+
+# Logs
+logs/*.log
+
+# OS
+.DS_Store
+Thumbs.db
