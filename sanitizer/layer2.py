@@ -142,28 +142,36 @@ class Layer2Scanner:
 
     # ------------------------------------------------------------------ entry
     def scan(self, text: str) -> str:
-        # Top-level entry point. Classify the source once, count token frequencies
-        # for the uniqueness signal, then evaluate every word and rebuild the line.
-        # Wrapped so any failure falls through to returning the original text.
+        # Top-level entry point. Pass comment lines through entirely.
+        # Classify source once, then evaluate every non-comment line.
         try:
             source = self._classify_source(text)
-            words = text.split(" ")
-            decomposed = [self._decompose(w) for w in words]
-
-            # Uniqueness signal — how often each scored token appears in the line.
-            counts = Counter(d[2] for d in decomposed if d[2])
-
-            out = []
-            for word, (lead, prefix, token, trail, value_pos) in zip(words, decomposed):
-                if not word or token == "":
-                    out.append(word)  # empty or pure-punctuation word
-                    continue
-                new_token = self._evaluate(token, source, value_pos, counts[token])
-                out.append(f"{lead}{prefix}{new_token}{trail}")
-            return " ".join(out)
+            words = text.split()
+            freq = Counter(words)
+        
+            processed = []
+            for line in text.split('\n'):
+                if line.strip().startswith('#'):
+                    processed.append(line)
+                else:
+                    processed.append(self._scan_line(line, source, freq))
+            return '\n'.join(processed)
         except Exception:
-            # Fail closed — never emit a half-sanitized line. Layers 3/4 catch leaks.
-            return text
+            return text  # fail open on scan error, Layer 3 catches leaks
+    def _scan_line(self, line: str, source: str, freq) -> str:
+        # Process one non-comment line: decompose each space-separated word,
+        # score its token, and rebuild the line preserving spacing. Uniqueness
+        # is read from the document-wide frequency map (freq) built by scan().
+        out = []
+        for word in line.split(" "):
+            lead, prefix, token, trail, value_pos = self._decompose(word)
+            if not word or token == "":
+                out.append(word)
+                continue
+            count = freq.get(token, freq.get(word, 1))
+            new_token = self._evaluate(token, source, value_pos, count)
+            out.append(f"{lead}{prefix}{new_token}{trail}")
+        return " ".join(out)
 
     # --------------------------------------------------------- word structure
     def _split_affixes(self, word: str):
