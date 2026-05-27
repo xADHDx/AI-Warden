@@ -21,3 +21,4 @@ logs/*.log
 Thumbs.db
 vault/.vault.enc
 vault/.vault.key
+registry/registry.json

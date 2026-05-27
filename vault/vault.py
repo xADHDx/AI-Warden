@@ -15,6 +15,7 @@ class TokenVault:
         self._lock = threading.Lock()  # mutex lock prevents concurrent write race conditions
         self._vault = {}               # real value → token mapping
         self._reverse = {}             # token → real value mapping for detokenization
+        self._hashes = {}              # token → BLAKE3 hash mapping for Layer 4 verification
         self._prime = None             # session prime, generated fresh each session
         self._fernet = None            # Fernet encryption instance for vault file
         self._load_or_create_key()
@@ -36,6 +37,7 @@ class TokenVault:
         with self._lock:
             self._vault = {}
             self._reverse = {}
+            self._hashes = {}
             self._prime = generate_prime()
             self._save()
 
@@ -45,8 +47,10 @@ class TokenVault:
             if real_value in self._vault:
                 return self._vault[real_value]  # return existing token if already mapped
             token = self._generate_valid_token()
+            token_hash = checksum(token, self._prime)  # generate BLAKE3 hash for Layer 4
             self._vault[real_value] = token
-            self._reverse[token] = real_value   # reverse map for detokenization
+            self._reverse[token] = real_value          # reverse map for detokenization
+            self._hashes[token] = token_hash           # store hash for verification
             self._save()
             return token
 
@@ -56,26 +60,30 @@ class TokenVault:
             return self._reverse.get(token)
 
     def verify(self, token):
-        # Layer 4 proof — verify token satisfies session prime checksum
-        return verify_token(token, self._prime)
+        # Layer 4 proof — verify token against its stored BLAKE3 hash
+        stored_hash = self._hashes.get(token)
+        if stored_hash is None:
+            return False  # token not in vault — automatic fail
+        return verify_token(token, self._prime, stored_hash)
 
     def get_prime(self):
         # Return the current session prime
         return self._prime
 
     def _generate_valid_token(self):
-        # Generate a random token that satisfies checksum mod prime = 0
+        # Generate a random 8-digit token and compute its BLAKE3 hash
+        # Token validity is now defined by having a stored hash, not arithmetic
         while True:
             candidate = secrets.randbelow(90000000) + 10000000
-            if checksum(candidate) % self._prime == 0:
-                if candidate not in self._reverse:
-                    return candidate
+            if candidate not in self._reverse:  # ensure uniqueness
+                return candidate
 
     def _save(self):
         # Encrypt and persist vault to disk — called after every write operation
         data = json.dumps({
             "vault": self._vault,
             "reverse": {str(k): v for k, v in self._reverse.items()},
+            "hashes": self._hashes,
             "prime": self._prime
         }).encode()
         encrypted = self._fernet.encrypt(data)

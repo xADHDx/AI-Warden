@@ -1,25 +1,34 @@
 import secrets
+import blake3
 
-def is_prime(n):     # Check if a number is prime
+def is_prime(n):
+    # Check if a number is prime
     if n < 2:
         return False
     if n == 2:
         return True
     if n % 2 == 0:
         return False
-    for i in range(3, int(n**0.5) + 1, 2):     # Check for factors from 3 to the square root of n
+    for i in range(3, int(n**0.5) + 1, 2):
+        # Check for factors from 3 to the square root of n
         if n % i == 0:
             return False
     return True
 
-def generate_prime(min_value=1000000000, max_value=9999999999): # Generate prime number within the range
+def generate_prime(min_value=1000000000, max_value=9999999999):
+    # Generate a cryptographically random 10-digit prime
     while True:
         candidate = secrets.randbelow(max_value - min_value) + min_value
-        if candidate % 2 != 0 and is_prime(candidate):  # Ensure the candidate is odd and prime
+        # Ensure the candidate is odd and prime before returning
+        if candidate % 2 != 0 and is_prime(candidate):
             return candidate
 
-def checksum(token):          # Calculate the checksum by summing the digits of the token
-    return sum(int(d) for d in str(token))
+def checksum(token, prime):
+    # BLAKE3 keyed hash using session prime as key
+    # produces cryptographically strong verification
+    key = str(prime).zfill(32).encode()[:32]  # 32-byte key from prime
+    return blake3.blake3(str(token).encode(), key=key).hexdigest()
 
-def verify_token(token, prime):      # Verify if the checksum of the token is divisible by the prime number
-    return checksum(token) % prime == 0
+def verify_token(token, prime, expected_hash):
+    # Verify token against its stored BLAKE3 hash
+    return checksum(token, prime) == expected_hash
