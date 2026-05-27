@@ -4,6 +4,36 @@ import binascii
 import urllib.parse
 from vault.vault import TokenVault
 
+# --- Obfuscation normalization -------------------------------------------------
+# Invisible / zero-width characters carry no visible content but split tokens, so
+# they are used to slip PII past the regex layer (e.g. 192<ZWSP>.168.1.57).
+# Stripped entirely before any matching.
+_ZERO_WIDTH_CHARS = (
+    "​‌‍⁠⁡⁢⁣⁤"  # ZWSP/ZWNJ/ZWJ/word-joiner
+    "﻿‎‏­"                          # BOM, LRM/RLM, soft hyphen
+)
+# Unicode characters that imitate the ASCII '.' separator (used to break IP and
+# domain matching, e.g. the Lisu letter 192ꓸ168ꓸ1ꓸ57). Folded to '.' so the
+# dotted-quad and domain regexes still fire.
+_DOT_CONFUSABLES = "․。．ꓸ܁܂﹒‧｡"
+
+
+def _build_normalize_table():
+    # Translation table: delete control/invisible chars, fold dot look-alikes.
+    table = {}
+    for cp in range(0x00, 0x20):            # C0 controls incl. NUL ...
+        if cp not in (0x09, 0x0A, 0x0D):    # ... but keep tab / newline / CR
+            table[cp] = None
+    table[0x7F] = None                      # DEL
+    for ch in _ZERO_WIDTH_CHARS:
+        table[ord(ch)] = None
+    for ch in _DOT_CONFUSABLES:
+        table[ord(ch)] = ord(".")
+    return table
+
+
+_NORMALIZE_TABLE = _build_normalize_table()
+
 # Common date patterns to protect from tokenization
 DATE_PATTERNS = [
     re.compile(r'\d{4}/\d{2}/\d{2}'),           # 2026/05/26
@@ -177,12 +207,22 @@ class Layer1Tokenizer:
             return m.group(0) if decoded is None else decoded
         return self._B64_BLOB_RE.sub(repl_blob, text)
 
+    def _strip_obfuscation(self, text: str) -> str:
+        # Remove invisible / zero-width and control characters (including NUL) and
+        # fold Unicode separator look-alikes to ASCII. This denies the attacker
+        # the ability to split a value — 192<ZWSP>.168.1.57, /etc/<NUL>passwd,
+        # 192<LISU-DOT>168<LISU-DOT>1<LISU-DOT>57 — to slip it past the structural
+        # regexes. Runs first, before any decoding, so the decoders and the regex
+        # layer all see the de-obfuscated text.
+        return text.translate(_NORMALIZE_TABLE)
+
     def normalize(self, text: str) -> str:
         # Log normalizer (ZKDP SPEC, Layer 1): decode every supported encoding
         # into canonical form BEFORE the regex layer runs, so obfuscated PII is
-        # matched as real PII. URL-decode first (an outer percent-encoding may
-        # wrap any of the others), then base64 blobs (which may themselves
-        # contain an encoded IP), then the numeric IP encodings.
+        # matched as real PII. Strip obfuscation characters first, then URL-decode
+        # (an outer percent-encoding may wrap any of the others), then base64
+        # blobs (which may themselves contain an encoded IP), then numeric IPs.
+        text = self._strip_obfuscation(text)
         text = self._decode_url(text)
         text = self._decode_base64(text)
         text = self._decode_hex_ips(text)
