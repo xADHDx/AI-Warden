@@ -14,7 +14,7 @@ import math
 
 # --- Independent detection patterns (deliberately re-derived, not shared) ---
 
-# Raw dotted-quad IPv4 (e.g. 192.168.1.57). Token output is 8 plain digits with
+# Raw dotted-quad IPv4 (e.g. 10.0.0.1). Token output is 8 plain digits with
 # no dots, so this only fires on a real address that slipped through.
 _IPV4 = re.compile(r'(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)')
 
@@ -200,7 +200,7 @@ if __name__ == "__main__":
     print(f'Clean test: {result} - {reason}')
 
     # Test 2 - raw IP should fail
-    dirty = '192.168.1.57 connected successfully'
+    dirty = '10.0.0.1 connected successfully'
     result, reason = l3.check(dirty)
     print(f'Dirty test: {result} - {reason}')
 
