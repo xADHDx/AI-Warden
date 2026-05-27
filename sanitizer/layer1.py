@@ -21,6 +21,19 @@ class Layer1Tokenizer:
         # Regex patterns for known PPI types
         # Order matters — more specific patterns must come before general ones
         self.patterns = [
+            # Encoded IPv4 — hex form (0xC0A80139). Must precede the dotted IPv4
+            # rule so obfuscated addresses are caught before plain matching.
+            (re.compile(r'\b0x[0-9a-fA-F]{8}\b'), 'hex_ip'),
+
+            # Encoded IPv4 — single decimal integer form (e.g. 3232235833).
+            # Covers the full 10-digit IPv4 integer range 1,000,000,000 to
+            # 4,294,967,295 ([1-3] billions, plus 4.0-4.29 billion). Kept to 10
+            # digits so it never re-tokenizes the 8-digit vault tokens.
+            (re.compile(r'\b[1-3][0-9]{9}\b|\b4[0-2][0-9]{8}\b'), 'decimal_ip'),
+
+            # Encoded IPv4 — dotted octal form with leading-zero octets.
+            (re.compile(r'\b0\d{3}\.\d+\.\d+\.\d+\b'), 'octal_ip'),
+
             # IPv4 addresses
             (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), 'ip'),
 
@@ -38,6 +51,14 @@ class Layer1Tokenizer:
 
             # Domain names
             (re.compile(r'\b(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b'), 'domain'),
+
+            # Windows registry paths (HKEY_LOCAL_MACHINE\Software\...). Must
+            # precede the path rules so the full key is captured as one token.
+            (re.compile(r'HKEY_[A-Z_]+(?:\\[^\s=]+)+'), 'winreg'),
+
+            # Windows backslash file paths (C:\Users\admin\file). The forward-
+            # slash path rule below does not cover these.
+            (re.compile(r'([A-Za-z]:\\(?:[^\s\\]+\\)*[^\s\\]*)'), 'winpath'),
 
             # File paths
             (re.compile(r'(/[a-zA-Z0-9_\-\.]+){2,}'), 'path'),
