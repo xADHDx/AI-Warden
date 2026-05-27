@@ -19,3 +19,5 @@ logs/*.log
 # OS
 .DS_Store
 Thumbs.db
+vault/.vault.enc
+vault/.vault.key
