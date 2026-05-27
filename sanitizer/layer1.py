@@ -1,4 +1,6 @@
 import re
+import base64
+import binascii
 import urllib.parse
 from vault.vault import TokenVault
 
@@ -19,7 +21,10 @@ class Layer1Tokenizer:
         self.vault = vault  # shared vault instance for token assignment
 
         # Regex patterns for known PPI types
-        # Order matters — more specific patterns must come before general ones
+        # Order matters — more specific patterns must come before general ones.
+        # NOTE: normalize() already rewrites hex/decimal/octal-encoded IPs to
+        # dotted-quad form before these run, so the three encoded-IP rules below
+        # are now fail-closed fallbacks for any encoding the normalizer skipped.
         self.patterns = [
             # Encoded IPv4 — hex form (0xC0A80139). Must precede the dotted IPv4
             # rule so obfuscated addresses are caught before plain matching.
@@ -88,9 +93,108 @@ class Layer1Tokenizer:
             (re.compile(r'\b(password|passwd|pwd)[=:\s]+\S+', re.IGNORECASE), 'password'),
         ]
 
+    # ----------------------------------------------------------- normalizer
+    # Encoded-IP shapes the numeric decoders recognise. Compiled once.
+    _HEX_IP_RE = re.compile(r'\b0[xX][0-9a-fA-F]{8}\b')
+    _DEC_IP_RE = re.compile(r'\b\d{10}\b')
+    _OCTAL_IP_RE = re.compile(
+        r'\b(0[0-7]{1,3})\.(0?[0-7]{1,3})\.(0?[0-7]{1,3})\.(0?[0-7]{1,3})\b')
+    # base64: a labelled value (base64=…, encoded:…) and a bare ≥16-char blob.
+    _B64_LABELLED_RE = re.compile(
+        r'\b(base64|b64|encoded)([=:])([A-Za-z0-9+/]{8,}={0,2})', re.IGNORECASE)
+    _B64_BLOB_RE = re.compile(
+        r'(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/])')
+
+    @staticmethod
+    def _int_to_ipv4(n: int) -> str:
+        # Pack a 32-bit integer into dotted-quad form (192.168.1.1).
+        return f"{(n >> 24) & 0xFF}.{(n >> 16) & 0xFF}.{(n >> 8) & 0xFF}.{n & 0xFF}"
+
+    def _decode_url(self, text: str) -> str:
+        # Decode percent-encoding (%xx), iterating to peel multi-layer encodings
+        # (e.g. %2520 -> %20 -> ' '). unquote leaves invalid escapes and already
+        # decoded text untouched, so the loop reaches a fixpoint quickly.
+        for _ in range(3):
+            decoded = urllib.parse.unquote(text)
+            if decoded == text:
+                break
+            text = decoded
+        return text
+
+    def _decode_hex_ips(self, text: str) -> str:
+        # 0xC0A80101 -> 192.168.1.1 (8 hex digits = one packed IPv4).
+        return self._HEX_IP_RE.sub(
+            lambda m: self._int_to_ipv4(int(m.group(0), 16)), text)
+
+    def _decode_decimal_ips(self, text: str) -> str:
+        # A bare 32-bit integer in IPv4 range -> dotted quad (3232235777 ->
+        # 192.168.1.1). Restricted to 10-digit values so it never collides with
+        # the vault's 8-digit tokens or short numeric metrics; out-of-range
+        # 10-digit numbers are left untouched.
+        def repl(m):
+            n = int(m.group(0))
+            return self._int_to_ipv4(n) if n <= 0xFFFFFFFF else m.group(0)
+        return self._DEC_IP_RE.sub(repl, text)
+
+    def _decode_octal_ips(self, text: str) -> str:
+        # Dotted-octal IPv4 (0300.0250.01.01 -> 192.168.1.1). The leading-zero
+        # first octet is the octal marker, so ordinary decimal IPs are not
+        # touched here (they are caught by the dotted-IPv4 regex instead).
+        def repl(m):
+            octets = [int(g, 8) for g in m.groups()]
+            if all(o <= 255 for o in octets):
+                return ".".join(str(o) for o in octets)
+            return m.group(0)
+        return self._OCTAL_IP_RE.sub(repl, text)
+
+    def _try_decode_b64(self, blob: str):
+        # Return the decoded text for a base64 blob, or None if it is not a safe
+        # candidate. Conservative on purpose: JWT segments are left for the JWT
+        # pattern, and only valid base64 that decodes to printable ASCII is
+        # substituted — binary/garbage decodes are left in place so the b64key
+        # regex can still tokenize them.
+        if blob.startswith("eyJ"):                      # JWT segment
+            return None
+        try:
+            raw = base64.b64decode(blob, validate=True)
+            decoded = raw.decode("ascii")
+        except (binascii.Error, ValueError, UnicodeDecodeError):
+            return None
+        if not decoded or decoded == blob or not decoded.isprintable():
+            return None
+        return decoded
+
+    def _decode_base64(self, text: str) -> str:
+        # Decode base64-wrapped values so any PII they hide (an IP, email, host)
+        # is exposed in plaintext for the regex layer below.
+        def repl_labelled(m):
+            decoded = self._try_decode_b64(m.group(3))
+            return m.group(0) if decoded is None else f"{m.group(1)}{m.group(2)}{decoded}"
+        text = self._B64_LABELLED_RE.sub(repl_labelled, text)
+
+        def repl_blob(m):
+            decoded = self._try_decode_b64(m.group(0))
+            return m.group(0) if decoded is None else decoded
+        return self._B64_BLOB_RE.sub(repl_blob, text)
+
+    def normalize(self, text: str) -> str:
+        # Log normalizer (ZKDP SPEC, Layer 1): decode every supported encoding
+        # into canonical form BEFORE the regex layer runs, so obfuscated PII is
+        # matched as real PII. URL-decode first (an outer percent-encoding may
+        # wrap any of the others), then base64 blobs (which may themselves
+        # contain an encoded IP), then the numeric IP encodings.
+        text = self._decode_url(text)
+        text = self._decode_base64(text)
+        text = self._decode_hex_ips(text)
+        text = self._decode_decimal_ips(text)
+        text = self._decode_octal_ips(text)
+        return text
+
     def sanitize(self, text: str) -> str:
+        # Normalize all encodings before any pattern matching (see normalize()).
+        text = self.normalize(text)
+
         # Protect dates from tokenization — dates belong to SFL transformer not Layer 1
-        text = urllib.parse.unquote(text)
         placeholders = {}
         date_patterns = [
             re.compile(r'\b\d{2}:\d{2}:\d{2}(\.\d+)?\b'),        # 03:14:22 or 03:14:22.000
