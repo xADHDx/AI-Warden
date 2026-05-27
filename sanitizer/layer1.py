@@ -1,4 +1,5 @@
 import re
+import urllib.parse
 from vault.vault import TokenVault
 
 # Common date patterns to protect from tokenization
@@ -49,6 +50,9 @@ class Layer1Tokenizer:
 
             # WireGuard and generic base64 keys 32+ chars
             (re.compile(r'\b[a-zA-Z0-9+/]{32,}={0,2}\b'), 'b64key'),
+
+            # base64 encoded values — only match known base64 prefixes
+            (re.compile(r'\b(base64|encoded)_?\w*=[A-Za-z0-9+/]{8,}={0,2}'), 'b64val'),
             
             # Email addresses
             (re.compile(r'\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b'), 'email'),
@@ -58,16 +62,21 @@ class Layer1Tokenizer:
 
             # Usernames in context
             (re.compile(r'\b(username|user|usr)[=:\s]+\S+', re.IGNORECASE), 'user'),
+
+            # Passwords in context
+            (re.compile(r'\b(password|passwd|pwd)[=:\s]+\S+', re.IGNORECASE), 'password'),
         ]
 
     def sanitize(self, text: str) -> str:
         # Protect dates from tokenization — dates belong to SFL transformer not Layer 1
+        text = urllib.parse.unquote(text)
         placeholders = {}
         date_patterns = [
-            re.compile(r'\d{4}/\d{2}/\d{2}'),                        # 2026/05/26
-            re.compile(r'\d{4}-\d{2}-\d{2}'),                        # 2026-05-26
-            re.compile(r'\d{2}/\w{3}/\d{4}'),                        # 26/May/2026
-            re.compile(r'\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'),     # May 26 03:14:22
+            re.compile(r'\b\d{2}:\d{2}:\d{2}(\.\d+)?\b'),        # 03:14:22 or 03:14:22.000
+            re.compile(r'\d{4}/\d{2}/\d{2}'),                      # 2026/05/26
+            re.compile(r'\d{4}-\d{2}-\d{2}'),                      # 2026-05-26
+            re.compile(r'\d{2}/\w{3}/\d{4}'),                      # 26/May/2026
+            re.compile(r'\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'),   # May 26 03:14:22
         ]
         for i, dp in enumerate(date_patterns):
             for match in dp.finditer(text):
