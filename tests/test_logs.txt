@@ -1,0 +1,6 @@
+2026/05/26 03:14:22 INFO Starting server addr=10.0.0.1:4533
+2026/05/26 03:14:23 INFO Connected to DB path=/mnt/data/app/app.db
+2026/05/26 03:14:51 INFO Login succeeded username=testuser ip=10.0.0.2
+2026/05/26 03:22:17 WARN Transcode failed trackID=8842 path=/mnt/data/music/track.flac
+2026/05/26 03:22:18 ERROR Stream error username=testuser ip=10.0.0.2 err=codec not found
+2026/05/26 04:01:13 WARN High memory usage pid=1842 mem=7.8GB limit=8GB host=10.0.0.1
