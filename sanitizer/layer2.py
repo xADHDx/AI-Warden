@@ -16,10 +16,41 @@ OLLAMA_TIMEOUT = float(os.environ.get("AIWARDEN_OLLAMA_TIMEOUT", "10"))
 
 # ---------------------------------------------------------------------------
 # Signal 1 reference data — Vocabulary classifier (VOCAB_CLASS)
-# A token whose lowercased core appears here is a recognised, non-identifying
-# system word. Tokens built entirely from these are SYSTEM; tokens with no known
-# part are UNKNOWN; a mix is MIXED. This is an allow-list: unknown = risk.
+# The classifier judges whether a token reads like natural language or a known
+# technical term. It draws on three sources:
+#   ENGLISH_DICT    — the system word list, loaded at startup (~100k words)
+#   SAFE_VOCABULARY — supplemental technical / log terms (below)
+#   LINUX_TERMS     — syslog / systemd / kernel / network / HTTP terminology
+# A token failing the natural-language checks against all three is UNKNOWN.
 # ---------------------------------------------------------------------------
+
+# Candidate system dictionaries, in priority order. Override with AIWARDEN_DICT_PATH.
+_DICT_PATHS = [
+    os.environ.get("AIWARDEN_DICT_PATH", ""),
+    "/usr/share/dict/american-english",
+    "/usr/share/dict/words",
+]
+
+
+def _load_english_dict():
+    # Load a system word list into a lowercase set for the vocabulary classifier.
+    # Fails gracefully to an empty set if no dictionary is installed — the
+    # technical term sets then carry the classifier and unknown tokens fail
+    # toward tokenizing (the privacy-safe direction).
+    for path in _DICT_PATHS:
+        if path and os.path.exists(path):
+            try:
+                with open(path, encoding="utf-8", errors="ignore") as fh:
+                    return {line.strip().lower() for line in fh if line.strip()}
+            except OSError:
+                continue
+    return set()
+
+
+# Loaded once at import time and shared across all scanner instances.
+ENGLISH_DICT = _load_english_dict()
+
+# Supplemental technical terms not always present in an English dictionary.
 SAFE_VOCABULARY = {
     # Generic system / service nouns
     "server", "service", "services", "daemon", "process", "thread", "job", "task",
@@ -54,6 +85,39 @@ SAFE_VOCABULARY = {
     "hours", "percent", "version", "config", "default", "unknown",
     "all", "any", "some", "each", "every", "systems", "errors", "warnings",
     "messages", "logs", "log", "data", "out", "off", "this", "that", "it",
+}
+
+# Linux / infrastructure terminology: syslog, systemd, kernel, network, HTTP.
+# These are generic technology terms (not product or host identities) that a
+# plain English dictionary will not contain.
+LINUX_TERMS = {
+    # syslog / journald / systemd / cron
+    "syslog", "rsyslog", "journald", "journalctl", "systemd", "systemctl",
+    "dmesg", "cron", "crond", "crontab", "logrotate", "daemon", "tty", "pts",
+    "init", "sysctl", "cgroup", "cgroups", "namespace", "facility", "severity",
+    # ssh / auth / privilege
+    "sshd", "ssh", "scp", "sftp", "sudo", "sudoers", "pam", "publickey",
+    "pubkey", "preauth", "keepalive", "authpriv", "getty", "agetty", "setuid",
+    # kernel / hardware
+    "kernel", "oom", "oomkiller", "segfault", "kworker", "ksoftirqd", "modprobe",
+    "udev", "nofile", "hugepage", "numa", "irq", "dma", "acpi", "syscall",
+    # network
+    "eth", "ens", "enp", "wlan", "veth", "bridge", "vlan", "subnet", "gateway",
+    "iptables", "nftables", "netfilter", "conntrack", "wireguard", "tunnel",
+    "tcp", "udp", "icmp", "arp", "dhcp", "dns", "ndp", "mtu", "rtt", "nat",
+    "ifconfig", "netstat", "iproute", "traceroute", "ping", "curl", "wget",
+    "ipv4", "ipv6", "loopback", "localhost", "hostname", "fqdn", "endpoint",
+    # http / web servers
+    "http", "https", "http2", "websocket", "wss", "tls", "ssl", "sni", "mtls",
+    "nginx", "apache", "httpd", "gunicorn", "uvicorn", "haproxy", "proxy",
+    "upstream", "downstream", "cors", "etag", "gzip", "mime", "useragent",
+    "referer", "keepalive", "vhost", "fastcgi", "uwsgi", "webhook",
+    # containers / virtualization
+    "docker", "dockerd", "containerd", "podman", "kubelet", "kubernetes", "lxc",
+    "lxd", "qemu", "kvm", "libvirt", "vzdump", "proxmox", "cgroupfs", "runc",
+    # filesystem / storage / ops
+    "fstab", "inode", "umount", "tmpfs", "overlayfs", "ext4", "xfs", "zfs",
+    "btrfs", "lvm", "swap", "rootfs", "chroot", "chmod", "chown", "rsync",
 }
 
 # Keys whose left-hand side acts as a descriptive label (role KEY).
@@ -105,6 +169,83 @@ SOURCE_SIGNATURES = {
     "APP": {"http", "https", "request", "response", "status", "container",
             "image", "transcode", "codec", "api"},
 }
+
+_VOWELS = set("aeiou")
+
+
+def _char_entropy(s: str) -> float:
+    # Shannon entropy of a string in bits per character (average bits/symbol).
+    # Random strings run high; short or repetitive strings stay low.
+    n = len(s)
+    if n < 2:
+        return 0.0
+    counts = {}
+    for ch in s:
+        counts[ch] = counts.get(ch, 0) + 1
+    entropy = 0.0
+    for c in counts.values():
+        p = c / n
+        entropy -= p * math.log2(p)
+    return entropy
+
+
+def _word_part_is_natural(word: str) -> bool:
+    # Judge a single word-part. Dictionary membership is decisive. Otherwise run
+    # the heuristic checks and accept the part only if it trips at most one of
+    # them; a part that fails multiple checks looks like an identifier, not a word.
+    w = word.lower()
+
+    # Check 1 — Dictionary membership (english + technical + linux). Decisive PASS.
+    if w in ENGLISH_DICT or w in SAFE_VOCABULARY or w in LINUX_TERMS:
+        return True
+    failed = 1  # not in any dictionary is itself one failed check
+
+    # Check 2 — Length. Ordinary words are roughly 3..30 characters.
+    if len(w) < 3 or len(w) > 30:
+        failed += 1
+
+    # Check 3 — Mixed case combined with digits is a strong identifier signal
+    # (e.g. "ghp_xK9mP2", "iPhone12"). Letters+digits alone is a milder signal.
+    has_alpha = any(c.isalpha() for c in word)
+    has_digit = any(c.isdigit() for c in word)
+    mixed_case = has_alpha and word != word.lower() and word != word.upper()
+    if has_digit and mixed_case:
+        failed += 2
+    elif has_digit and has_alpha:
+        failed += 1
+
+    # Check 4 — Vowel ratio. Real words are typically 25–45% vowels.
+    letters = [c for c in w if c.isalpha()]
+    if not letters:
+        failed += 1
+    else:
+        ratio = sum(1 for c in letters if c in _VOWELS) / len(letters)
+        if ratio < 0.25 or ratio > 0.45:
+            failed += 1
+
+    # Check 5 — Character entropy. Real words sit below ~3.0 bits/char.
+    if _char_entropy(w) >= 3.0:
+        failed += 1
+
+    return failed <= 1
+
+
+def is_natural_language(token: str) -> bool:
+    # Decide whether a token reads like natural language / a known technical term
+    # rather than an identifier, hostname, or random string. Multi-part tokens
+    # (split on separators, e.g. "HTTP/1.1", "curl/7.68.0") are natural only when
+    # every alphabetic part is; purely numeric parts (version numbers) are neutral.
+    t = (token or "").strip()
+    if not t:
+        return False
+    parts = [p for p in re.split(r'[_\-./:@]', t) if p]
+    word_parts = [p for p in parts if not p.isdigit()]
+    if not word_parts:
+        # No alphabetic content at all (e.g. an IP "185.220.101.45" or a bare
+        # version "7.68.0"). Not a word — fail toward tokenizing. Numeric suffixes
+        # only get a pass when attached to a real word part, handled below.
+        return False
+    return all(_word_part_is_natural(p) for p in word_parts)
 
 
 class Layer2Scanner:
@@ -278,19 +419,12 @@ class Layer2Scanner:
 
     def _vocab_signal(self, token: str, role: str) -> str:
         # Signal 1 — VOCAB_CLASS. A recognised structural role is inherently
-        # SYSTEM. Otherwise split the token on separators and judge by how many
-        # parts are known safe words: all known → SYSTEM, none → UNKNOWN, mix → MIXED.
+        # SYSTEM. Otherwise defer to the natural-language scorer: SYSTEM when the
+        # token reads like real language or a known technical term, UNKNOWN when
+        # it fails multiple natural-language checks (looks like an identifier).
         if role != "VALUE":
             return "SYSTEM"
-        parts = [p for p in re.split(r'[_\-./]', token.lower()) if p]
-        if not parts:
-            return "UNKNOWN"
-        known = sum(1 for p in parts if p in SAFE_VOCABULARY)
-        if known == len(parts):
-            return "SYSTEM"
-        if known == 0:
-            return "UNKNOWN"
-        return "MIXED"
+        return "SYSTEM" if is_natural_language(token) else "UNKNOWN"
 
     def _classify_source(self, text: str) -> str:
         # Signal 3 — classify the log source from keyword signatures. Returns the
@@ -304,20 +438,9 @@ class Layer2Scanner:
         return best
 
     def _entropy(self, token: str) -> float:
-        # Shannon entropy in bits per character (average bits per symbol). Random
-        # high-entropy strings (keys, hashes) approach log2(alphabet); short or
-        # repetitive strings stay low. Compared against the 3.5 bits/char threshold.
-        n = len(token)
-        if n < 2:
-            return 0.0
-        counts = {}
-        for ch in token:
-            counts[ch] = counts.get(ch, 0) + 1
-        entropy = 0.0
-        for c in counts.values():
-            p = c / n
-            entropy -= p * math.log2(p)
-        return entropy
+        # Shannon entropy in bits per character, compared against the risk
+        # weight's 3.5 bits/char threshold. Delegates to the shared module helper.
+        return _char_entropy(token)
 
     # --------------------------------------------------------------- escalate
     def _escalate(self, token: str, source: str) -> str:
