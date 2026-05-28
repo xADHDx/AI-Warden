@@ -122,6 +122,21 @@ class Layer1Tokenizer:
             # Passwords in context
             (re.compile(r'\b(password|passwd|pwd)[=:\s]+\S+', re.IGNORECASE), 'password'),
 
+            # Bare username after a preposition. Catches log shapes that omit
+            # a username= keyword, e.g. "Connected ... as appuser" or "session
+            # opened for deploy". Whole match (preposition + name) becomes a
+            # single token; the preposition is consumed along with the value.
+            (re.compile(
+                r'\b(?:as|for|by|from|to)\s+([a-zA-Z][a-zA-Z0-9_.\-]{2,})\b',
+                re.IGNORECASE
+            ), 'bare_user'),
+
+            # Container names — standard Docker convention <word>_<word>+_<digit>
+            # (redis_cache_1, nginx_lb_1, myapp_web_1). These survive L2 because
+            # each word part passes the natural-language heuristic, so they need
+            # an explicit L1 tokenizer rather than being left to context scoring.
+            (re.compile(r'\b[a-z][a-z0-9]*(?:_[a-z0-9]+){1,}_\d+\b'), 'container_name'),
+
             # Application identifier patterns — key=integer
             (re.compile(r'\b\w+[Ii][Dd]=\d+'), 'appid'),
             (re.compile(r'\bpid=\d+', re.IGNORECASE), 'pid'),

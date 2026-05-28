@@ -40,6 +40,14 @@ _UNIX_PATH = re.compile(r'(?:/[A-Za-z0-9._\-]+){2,}')
 _WIN_PATH = re.compile(r'[A-Za-z]:\\[^\s]+')
 _WIN_REG = re.compile(r'HKEY_[A-Z_]+(?:\\[^\s=]+)+')
 
+# nginx / Apache Combined Log Format date: [DD/Mon/YYYY:hh:mm:ss +zzzz].
+# Masked before the unix-path detector runs because /Mon/YYYY inside the
+# brackets otherwise matches _UNIX_PATH as a two-segment path. The mask is
+# restored before the user-context and high-entropy checks so they see the
+# original text.
+CLF_DATE = re.compile(r'\[\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}\s[+-]\d{4}\]')
+_CLF_DATE_PLACEHOLDER = "__CLF_DATE__"
+
 # username= / user= / usr= followed by a value (case-insensitive). The value is
 # checked separately against the vault — only a real (non-token) value fails.
 _USER_CTX = re.compile(r'\b(?:username|user|usr)\s*[=:]\s*(\S+)', re.IGNORECASE)
@@ -99,13 +107,19 @@ class EgressChecker:
         if m:
             return False, f"raw IPv4 address detected: {m.group(0)}"
 
-        # File paths — Unix, Windows, registry.
+        # File paths — Unix, Windows, registry. Mask CLF date brackets first
+        # so /Mon/YYYY (a slash-segmented run inside a date) is not flagged as
+        # a unix path; the original text is restored immediately after for the
+        # user-context and high-entropy checks below.
+        saved = text
+        text = CLF_DATE.sub(_CLF_DATE_PLACEHOLDER, text)
         if _WIN_REG.search(text):
             return False, "windows registry path detected"
         if _WIN_PATH.search(text):
             return False, "windows file path detected"
         if _UNIX_PATH.search(text):
             return False, "unix file path detected"
+        text = saved
 
         # username=/user=/usr= carrying a non-token value.
         leaked_user = self._find_user_leak(text)
