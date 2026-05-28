@@ -121,6 +121,17 @@ class Layer1Tokenizer:
 
             # Passwords in context
             (re.compile(r'\b(password|passwd|pwd)[=:\s]+\S+', re.IGNORECASE), 'password'),
+
+            # Application identifier patterns — key=integer
+            (re.compile(r'\b\w+[Ii][Dd]=\d+'), 'appid'),
+            (re.compile(r'\bpid=\d+', re.IGNORECASE), 'pid'),
+
+            # Bare metric — <digits><unit/percent>. Tokenised whole so the digit
+            # run never surfaces as an unproven numeric to Layer 4's proof gate.
+            # Trailing (?!\w) (not \b) so that '%' — itself non-word — still
+            # terminates the match cleanly ('\b' would require a word/non-word
+            # transition, which fails between '%' and a following space).
+            (re.compile(r'\b\d+(?:%|ms|s|m|h|d|kb|mb|gb|tb|b)(?!\w)', re.IGNORECASE), 'metric'),
         ]
 
     # ----------------------------------------------------------- normalizer
