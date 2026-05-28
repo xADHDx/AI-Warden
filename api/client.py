@@ -54,10 +54,10 @@ SYSTEM_PROMPT = (
     "conforming to ZKDP response format will be rejected."
 )
 
-# Model and max_tokens pinned by the operator. claude-sonnet-4-20250514 is
-# deprecated (retires 2026-06-15) — see shared/models.md; the operator has
-# accepted that risk. Migrate to claude-sonnet-4-6 before the retirement date.
-MODEL = "claude-sonnet-4-20250514"
+# Model and max_tokens pinned by the operator. claude-sonnet-4-6 is the
+# current Sonnet alias — best speed/intelligence balance for the strict
+# ZKDP-format response shape, with no date suffix to age out.
+MODEL = "claude-sonnet-4-6"
 MAX_TOKENS = 1000
 
 # Repair gate. CONFIDENCE below this floor returns None — the AI was not
