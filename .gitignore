@@ -22,3 +22,6 @@ Thumbs.db
 vault/.vault.enc
 vault/.vault.key
 registry/registry.json
+
+# Tests are kept local — the working prototype does not ship them.
+tests/
